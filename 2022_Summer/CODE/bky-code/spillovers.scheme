@@ -1,0 +1,19 @@
+#include s1color
+
+linewidth p1 thick
+linewidth p2 thick
+linewidth p3 thick
+linewidth p4 thick
+linewidth p5 thick
+
+linepattern p1 solid
+linepattern p2 shortdash
+linepattern p3 longdash
+linepattern p4 "_---"
+linepattern p5 "dash_dot"
+
+color p1 gs10
+color p2 brown
+color p3 navy
+color p4 teal
+color p5 maroon
