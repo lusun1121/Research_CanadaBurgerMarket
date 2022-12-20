@@ -1,0 +1,599 @@
+// *********************************************************************
+//
+//	Code in GAUSS programming language (version 11.0)
+//
+//  structural_estimation_dyngame.gss
+//                                                                 
+//  THIS PROGRAM ESTIMATES A DYNAMIC GAME OF ENTRY-EXIT USING
+//  DATA ON MCDONALDS AND BURGER KING LOCATION OF OUTLETS IN UK
+// 
+//  by VICTOR AGUIRREGABIRIA & ARVIND MAGESAN
+//
+// *********************************************************************
+//
+// SPECIFICATION OF ONE-PERIOD PROFIT FUNCTION
+//  The profit function for firm i is:
+//  
+//      Ui = zi(ai,aj) * thetai - ai * epsi
+//
+//  where ai is the new entry decision of firm i, aj is the
+//  new entry decision of firm j, zi(ai,aj) are vectors 
+//  of variables, and thetai is a vector of parameters. More specifically,
+//
+//      thetai = (VP0i, VP1i, VP2i, FC1i, FC2i)
+//
+//  where VP0i, VP1i, and VP2i are parameters in the variable profit function,
+//  FC1i and FC2i are parameters in fixed costs. And
+//
+//      zi(ai,aj) = { S * 1(xi + ai > 0) }
+//                ~ { S * (xi + ai - xj - aj) }
+//                ~ { S * (xi + ai - xj - aj)^2 }
+//                ~ { -1(xi + ai > 0) }
+//                ~ { -(xi + ai) }
+//                ~ { -(xi + ai)^2 }
+//
+
+new ;
+closeall ;
+library pgraph gauss ;
+format /mb1 /ros 16,4 ;
+
+// ****************************************
+// PART 1: SPECIFICATION OF SOME CONSTANTS
+// ****************************************
+
+// Constants of the datafile
+// Name and address of data file
+filedat = 
+"c:\\mypapers\\arvind_rationalizability\\data\\toivanen_waterson_nolondon_120809.dat";         
+nobs = 2110 ;       // Number of observations in data file
+nmarket = 422 ;     // Number of local markets
+nyear = 5 ;         // Number of years
+nvar = 27 ;         // Number of variables in dataset
+
+// Constants of the model
+maxstore = 15 ;    // maximum number of stores
+nplayer = 2 ;
+dfact = 0.95 ;    // Discount factor
+maxiter = 50 ;
+namesb1 =  "VP0_BK"    | "VP1_BK"     | "VP2_BK"     | "FC0_BK"     | "FC1_BK"     | "FC2_BK"
+        |  "VP0_MD"    | "VP1_MD"     | "VP2_MD"     | "FC0_MD"     | "FC1_MD"     | "FC2_MD" ;
+namesb2 = "DENSITY"    | "GDP"        | "RENT"       | "TAX" ;
+namesb = namesb1 | namesb2 ;
+
+// Calculating some constants
+vstate = seqa(0,1,maxstore) ;   
+vstate = (vstate.*.ones(maxstore,1)) ~ (ones(maxstore,1).*.vstate) ; 
+    // Matrix with all possible values of the state variables
+nstate = rows(vstate) ;
+kp1 =  rows(namesb1)/2 ;
+kp2 =  rows(namesb2) ;
+kparam = rows(namesb) ;
+
+
+// ***************************************************
+// PART 2. READING DATA AND CONSTRUCTION OF VARIABLES
+// ***************************************************
+open dtin = ^filedat for read varindxi ;
+data = readr(dtin,nobs);
+dtin = close(dtin) ;
+
+county_name     = data[.,1] ;
+district_name   = data[.,2] ;
+county_code     = data[.,3] ;
+district_code   = data[.,4] ;
+year            = data[.,5] ;
+mcd_stock       = data[.,6] ;
+mcd_entry       = data[.,7] ;
+mcd_entdum      = data[.,8] ;
+bk_stock        = data[.,9] ;
+bk_entry        = data[.,10] ;
+bk_entdum       = data[.,11] ;
+district_area   = data[.,12] ;
+population      = data[.,13] ;
+pop_0514        = data[.,14] ;
+pop_1529        = data[.,15] ;
+pop_4559        = data[.,16] ;
+pop_6064        = data[.,17] ;
+pop_6574        = data[.,18] ;
+avg_rent        = data[.,19] ;
+ctax            = data[.,20] ;
+ecac            = data[.,21] ;
+ue              = data[.,22] ;
+gdp_pc          = data[.,23] ;
+dist_bkhq_miles = data[.,24] ;
+dist_bkhq_minu  = data[.,25] ;
+dist_mdhq_miles = data[.,26] ;
+dist_mdhq_minu  = data[.,27] ;
+
+// Construction of variables
+x_bk = bk_stock ;       // Stock of stores for BK
+x_md = mcd_stock ;      // Stock of stores for MD
+a_bk = (bk_entry.>0) ;      // Dummy of new entry for BK
+a_md = (mcd_entry.>0) ;     // Dummy of new entry for MD
+population = population/1000 ;  // Population in millions
+density = population./district_area ;
+
+// Market specific mean values of some exogenous explanatory variables
+marketsize = meanc(reshape(population,nmarket,nyear)') ;
+zmarket = meanc(reshape(density,nmarket,nyear)')
+        ~ meanc(reshape(gdp_pc,nmarket,nyear)')
+        ~ meanc(reshape(avg_rent,nmarket,nyear)')
+        ~ meanc(reshape(ctax,nmarket,nyear)') ;
+
+// *******************
+// PART 3. PROCEDURES
+// *******************
+
+// --------------------------------------
+// A. PROCEDURE for FREQUENCY ESTIMATOR  
+// --------------------------------------
+proc (1) = freqprob(yobs,xobs,xval) ;
+// -----------------------------------------------------------------------
+//  FREQPROB.SRC   Procedure that obtains a frequency estimation
+//                 of Prob(Y|X) where Y is a vector of binary 
+//                 variables and X is a vector of discrete variables
+//  FORMAT:
+//      freqp = freqprob(yobs,xobs,xval) 
+//  INPUTS:
+//  yobs    - (nobs x q) vector with sample observations 
+//            of Y = Y1 ~ Y2 ~ ... ~ Yq
+//            
+//  xobs    - (nobs x k) matrix with sample observations of X
+//
+//  xval    - (numx x k) matrix with the values of X for which
+//            we want to estimate Prob(Y|X).
+//  OUTPUTS:
+//  freqp   - (numx x q) vector with frequency estimates of
+//            Pr(Y|X) for each value in xval.
+//            Pr(Y1=1|X) ~ Pr(Y2=1|X) ~ ... ~ Pr(Yq=1|X) 
+// -----------------------------------------------------------------------
+
+  local numx, numq, prob1, t, selx, denom, numer ; 
+  numx = rows(xval) ;
+  numq = cols(yobs) ;
+  prob1 = zeros(numx,numq) ;
+  t=1 ;
+  do while t<=numx ;
+    selx = prodc((xobs.==xval[t,.])') ;
+    denom = sumc(selx) ;
+    if (denom==0) ;
+      prob1[t,.] = zeros(1,numq) ;
+    else ;
+      numer = sumc(selx.*yobs) ;
+      prob1[t,.] = (numer')./denom ;
+    endif ;
+    t=t+1 ;
+  endo ;
+  retp(prob1) ;
+endp ;
+
+// ----------------------------------------------
+// B. PRECEDURE for CONSTRAINED PROBIT ESTIMATOR
+// ---------------------------------------------- 
+
+proc (3) = miprobit(ydum,x,rest,b0,nombres,out) ;
+// -----------------------------------------------------------------------
+// MIPROBIT - Estimation of a Probit Model by Maximum Likelihood
+//            The optimization algorithm is a Newton's method
+//            with analytical gradient and hessian
+//
+// FORMAT    {best,varest,llike} = miprobit(ydum,x,rest,b0,nombres,out)
+//
+// INPUTS
+//      ydum    - (nobs x 1) vector with observations of the dependent variable
+//      x       - (nobs x k) matrix with observations of explanatory variables
+//                associated with the unrestricted parameters
+//      rest    - vector with observations of the sum of the explanatory
+//                variables whose parameters are restricted to be 1
+//                (Note that the value 1 is without loss of generality
+//                if the variable rest is constructed appropriately)
+//      b0      - (k x 1) vector with values of parameters to initialized 
+//                Newton's methos
+//      nombres - (k x 1) vector with names of parameters to estimate
+//      out     - 0=no table of results; 1=table with estimation results
+//
+//  OUTPUTS
+//      best    - ML estimates
+//      varest  - estimate of the covariance matrix
+//      llike   - value of log-likelihood function at the MLE
+// -----------------------------------------------------------------------
+
+  local myzero, nobs, nparam, eps, iter, llike,
+        criter, Fxb0, phixb0, lamdab0, dlogLb0,
+        d2logLb0, b1, lamda0, lamda1, Avarb, sdb, tstat,
+        numy1, numy0, logL0, LRI, pseudoR2, k ;
+  myzero = 1e-36 ;
+  nobs = rows(ydum) ;
+  nparam = cols(x) ;
+  eps = 1E-6 ;
+  iter=1 ;
+  llike = 1000 ;
+  criter = 1000 ;
+  do while (criter>eps) ;
+    if (out==1) ;
+      "" ;
+      "Pseudo MLE Iteration     = " iter ;
+      "Log-Likelihood function  = " llike ;
+      "Criterion                = " criter ;
+      "" ;
+    endif ;
+    Fxb0 = cdfn(x*b0+rest) ;
+    Fxb0 = Fxb0 + (myzero - Fxb0).*(Fxb0.<myzero)
+                + (1-myzero - Fxb0).*(Fxb0.>(1-myzero));
+    llike = ydum'*ln(Fxb0) + (1-ydum)'*ln(1-Fxb0) ;
+    phixb0 = pdfn(x*b0+rest) ;
+    lamdab0 = ydum.*(phixb0./Fxb0) + (1-ydum).*(-phixb0./(1-Fxb0)) ;
+    dlogLb0 = x'*lamdab0 ;
+    d2logLb0 = -((lamdab0.*(lamdab0 + x*b0 + rest)).*x)'*x ;
+    b1 = b0 - inv(d2logLb0)*dlogLb0 ;
+    criter = maxc(abs(b1-b0)) ;
+    b0 = b1 ;
+    iter = iter + 1 ;
+  endo ;
+  Fxb0 = cdfn(x*b0 + rest) ;
+  Fxb0 = Fxb0 + (myzero - Fxb0).*(Fxb0.<myzero)
+              + (1-myzero - Fxb0).*(Fxb0.>(1-myzero));
+  llike = ydum'*ln(Fxb0) + (1-ydum)'*ln(1-Fxb0) ;
+  phixb0 = pdfn(x*b0 + rest) ;
+  lamda0 = -phixb0./(1-Fxb0) ;
+  lamda1 =  phixb0./Fxb0 ;
+  Avarb  = ((lamda0.*lamda1).*x)'*x ;
+  Avarb  = inv(-Avarb) ;
+  sdb    = sqrt(diag(Avarb)) ;
+  tstat  = b0./sdb ;
+  numy1  = sumc(ydum) ;
+  numy0  = nobs - numy1 ;
+  logL0  = numy1*ln(numy1) + numy0*ln(numy0) - nobs*ln(nobs) ;
+  LRI    = 1 - llike/logL0 ;
+  pseudoR2 = 1 - ( (ydum - Fxb0)'*(ydum - Fxb0) )/numy1 ;
+  if (out==1) ;
+    "Number of Iterations     = " iter ;
+    "Log-Likelihood function  = " llike ;
+    "Likelihood Ratio Index   = " LRI ;
+    "Pseudo-R2                = " pseudoR2 ;
+    "" ;
+    "------------------------------------------------------------------";
+    "       Parameter     Estimate        Standard        t-ratios";
+    "                                     Errors" ;
+    "------------------------------------------------------------------";
+    k=1;
+    do while k<=nparam;
+      print $nombres[k];;b0[k];;sdb[k];;tstat[k];
+      k=k+1 ;
+    endo;
+    "------------------------------------------------------------------";
+  endif ;
+  retp(b0,Avarb,llike) ;
+endp ;
+
+
+// -------------------------------
+// C. PROCEDURE for NPL ESTIMATOR 
+// ------------------------------- 
+proc (4) = npl_bkmd(yobs, xobs, msize, zmarket, pchoice, mstate, beta, kiter, namesb);
+
+    // -----------------------------------------------------------------------
+    // NPL_BKMD
+    //  This procedure iterates in the NPL algorithm given an initial vector
+    //  of CCPs. The model is the dynamic game of local market entry for 
+    //  McDonalds and Burger King. The procedure returns the vector of parameter 
+    //  estimates, the variance matrix, and the matrix with players choice 
+    //  probabilities at every state, and at every sample point.
+    //
+    // FORMAT      (thetaest,varest,pest,pest_obs) =
+    //          npl_bkmd(yobs, xobs, msize, zmarket, pchoice, mstate, beta, kiter, namesb)
+    //
+    // INPUTS
+    //  yobs    -   (nobs x 2) matrix with observations of players' choices
+    //  xobs    -   (nobs x 2) matrix  with observations of players' endogenous 
+    //              state variables
+    //  msize   -   (nmarket x 1) vector with observations of market size (population)
+    //  zmarket -   (nmarket x kz) matrix with observations of time-invariant 
+    //              market chracteristics
+    //  pchoice -   (nstate*nmarket x 2) matrix with initial vector of CCPs for 
+    //              every market, state and player
+    //  mstate  -   (nstate x 2) matrix with all the possible values of the 
+    //              endogenous state variables
+    //  beta    -   Scalar with value of the discount factor
+    //  kiter   -   Scalar natural number with number of NPL iterations
+    //  namesb  -   (K x 1) vector with names of the structural parameters
+    //
+    //  OUTPUTS
+    //  thetaest    -   (K x1) vector with parameter estimates at the last NPL iteration
+    //  varest      -   (K xK) matrix of variances and covariances
+    //  pest        -   (nstate*nmarket x 2) matrix with estimates of CCPs for 
+    //                  every market, state and player
+    //  pest_obs    -   (nobs x 2) matrix with estimates of CCPs for every 
+    //                  observation and state
+    // -----------------------------------------------------------------------
+    
+  local myzero, nobs, nmarket, nyear, nplayer, ns, numx, ktot, kvpfc, kz, indxobs, j, 
+        xbk, xmd, npliter, criterion, conv_const, theta0,
+        p_bk, p_md, ztilda_bk, ztilda_md, etilda_bk, etilda_md, 
+        ztilda_obs_bk, ztilda_obs_md, etilda_obs_bk, etilda_obs_md,
+        m, valmsize, valzmarket,
+        zbk_00, zbk_01, zbk_10, zbk_11, zmd_00, zmd_01, zmd_10, zmd_11,
+        eprofbk_0, eprofbk_1, eprofmd_0, eprofmd_1,
+        tranxbk_bk0, tranxbk_bk1, tranxmd_md0, tranxmd_md1, tranxmd_bk, tranxbk_md,
+        tottran_bk0, tottran_bk1, tottran_md0, tottran_md1, uncontran,
+        value_z_bk, value_z_md, value_e_bk, value_e_md,
+        zt_bk, zt_md, et_bk, et_md, count1, count2,
+        zobs, eobs, thetaest, varest, likelihood, theta_bk, theta_md, pest_obs ;        
+
+  // ---------------
+  // Some constants 
+  // ---------------
+  myzero = 1e-12 ;          // Constant for truncation of CCPs to avoid numerical errors
+  nobs = rows(yobs) ;       // Total number of market*year observations 
+  nmarket = rows(msize) ;   // Total number of markets in the sample
+  nyear = nobs/nmarket ;    // Number of years in the sample (balanced panel)
+  if nyear/=int(nyear) ; "ERROR: Number of years is not an integer"; end; endif; 
+  nplayer = cols(yobs) ;    
+  ns = rows(pchoice)/nmarket ;  // number of states in a single market
+  if ns/=int(ns) ; "ERROR: Number of states in a single market is not an integer"; end; endif; 
+  numx = sqrt(ns) ;     // number of values of xbk or xmd
+  if numx/=int(numx) ; "ERROR: Number of values of xbk or xmd is not an integer"; end; endif; 
+  ktot = rows(namesb) ; // Total number of parameters
+  kz = cols(zmarket) ;  // Number of parameters associated with the control variables in zmarket
+  kvpfc =  (ktot-kz)/2 ;   // Number of parameters in var profits and fixed costs for a single firm
+  if kvpfc/=int(kvpfc) ; "ERROR: Number of parameters in var profits and fixed costs is not an integer"; end; endif; 
+  xbk = mstate[.,1] ;   // vector stock of stores for BK
+  xmd = mstate[.,2] ;   // vector stock of stores for MD
+
+  // -------------------------------------------
+  // Vector with indexes for the observed state  
+  // -------------------------------------------
+  indxobs = zeros(nobs,1) ;
+  j=1 ;
+  do while j<=ns ;
+    indxobs = indxobs + j.*prodc((xobs.==mstate[j,.])') ;
+    j=j+1 ;
+  endo ;
+
+  // -------------
+  // NPL algorithm 
+  // ------------- 
+  criterion = 1000 ;
+  conv_const = 1e-6 ;
+  theta0 = zeros(ktot,1) ;
+  npliter=1 ;
+  do while (npliter<=kiter).and(criterion>conv_const) ;
+    "NPL ITERATION =";; npliter ;; "Criterion =";; criterion ;
+    "" ;
+    // ---------------------------------------------------------
+    // TASK 1:  Computing the matrices ztilda_bk and ztilda_md 
+    //          and the vectors etilda_bk and etilda_md
+    //          for every market and every sample observation
+    // ---------------------------------------------------------
+    ztilda_bk = zeros(nmarket*ns,kvpfc+kz) ;
+    ztilda_md = zeros(nmarket*ns,kvpfc+kz) ;
+    etilda_bk = zeros(nmarket*ns,1) ;
+    etilda_md = zeros(nmarket*ns,1) ;
+    ztilda_obs_bk = zeros(nobs,kvpfc+kz) ;
+    ztilda_obs_md = zeros(nobs,kvpfc+kz) ;
+    etilda_obs_bk = zeros(nobs,1) ;
+    etilda_obs_md = zeros(nobs,1) ;
+    m=1;
+    do while m<=nmarket ;
+      valmsize = msize[m] ;
+      valzmarket = zmarket[m,.] ;
+      // -------------------------------------------------------------------- 
+      // Selection of probabilities for the market and
+      // truncation of probabilities to avoid inverse Mill's ratio = +INF          
+      // --------------------------------------------------------------------
+      p_bk = pchoice[(m-1)*ns+1:m*ns,1] ;
+      p_md = pchoice[(m-1)*ns+1:m*ns,2] ;
+      p_bk = (p_bk.<=myzero).*myzero 
+           + (p_bk.>=(1-myzero)).*(1-myzero) 
+           + (p_bk.>=myzero).*(p_bk.<=(1-myzero)).*p_bk ;
+      p_md = (p_md.<=myzero).*myzero 
+           + (p_md.>=(1-myzero)).*(1-myzero) 
+           + (p_md.>=myzero).*(p_md.<=(1-myzero)).*p_md ;
+
+      // ------------------------------ 
+      // Vectors of expected profits 
+      // ------------------------------ 
+      zbk_00 = (valmsize.*(xbk.>0))    ~ (valmsize.*(xbk-xmd))   ~ (valmsize.*(xbk-xmd).*(xbk-xmd))
+             ~ (-(xbk.>0))             ~ (-xbk)                  ~ (-xbk.*xbk)
+             ~ (valzmarket.*xbk) ;
+      zbk_01 = (valmsize.*(xbk.>0))    ~ (valmsize.*(xbk-xmd-1)) ~ (valmsize.*(xbk-xmd-1).*(xbk-xmd-1))
+             ~ (-(xbk.>0))             ~ (-xbk)                  ~ (-xbk.*xbk)
+             ~ (valzmarket.*xbk) ;
+      zbk_10 = (valmsize.*((xbk+1).>0))~ (valmsize.*(xbk+1-xmd))   ~ (valmsize.*(xbk+1-xmd).*(xbk+1-xmd))
+             ~ (-((xbk+1).>0))         ~ (-(xbk+1))                ~ (-(xbk+1).*(xbk+1))
+             ~ (valzmarket.*(xbk+1)) ;
+      zbk_11 = (valmsize.*((xbk+1).>0))~ (valmsize.*(xbk+1-xmd-1))   ~ (valmsize.*(xbk+1-xmd-1).*(xbk+1-xmd-1))
+             ~ (-((xbk+1).>0))         ~ (-(xbk+1))                ~ (-(xbk+1).*(xbk+1))
+             ~ (valzmarket.*(xbk+1)) ;
+
+      zmd_00 = (valmsize.*(xmd.>0))    ~ (valmsize.*(xmd-xbk))   ~ (valmsize.*(xmd-xbk).*(xmd-xbk))
+             ~ (-(xmd.>0))             ~ (-xmd)                  ~ (-xmd.*xmd)
+             ~ (valzmarket.*xmd) ;
+      zmd_01 = (valmsize.*(xmd.>0))    ~ (valmsize.*(xmd-xbk-1)) ~ (valmsize.*(xmd-xbk-1).*(xmd-xbk-1))
+             ~ (-(xmd.>0))             ~ (-xmd)                  ~ (-xmd.*xmd)
+             ~ (valzmarket.*xmd) ;
+      zmd_10 = (valmsize.*((xmd+1).>0))~ (valmsize.*(xmd+1-xbk))   ~ (valmsize.*(xmd+1-xbk).*(xmd+1-xbk))
+             ~ (-((xmd+1).>0))         ~ (-(xmd+1))                ~ (-(xmd+1).*(xmd+1))
+             ~ (valzmarket.*(xmd+1)) ;
+      zmd_11 = (valmsize.*((xmd+1).>0))~ (valmsize.*(xmd+1-xbk-1))   ~ (valmsize.*(xmd+1-xbk-1).*(xmd+1-xbk-1))
+             ~ (-((xmd+1).>0))         ~ (-(xmd+1))                ~ (-(xmd+1).*(xmd+1))
+             ~ (valzmarket.*(xmd+1)) ;
+
+      eprofbk_0 = (1-p_md).*zbk_00 + p_md.*zbk_01 ;     // Expected Profit BK if a=0
+      eprofbk_1 = (1-p_md).*zbk_10 + p_md.*zbk_11 ;     // Expected Profit BK if a=1
+      eprofmd_0 = (1-p_bk).*zmd_00 + p_bk.*zmd_01 ;     // Expected Profit MD if a=0
+      eprofmd_1 = (1-p_bk).*zmd_10 + p_bk.*zmd_11 ;     // Expected Profit MD if a=1
+
+      // --------------------------- 
+      // Transition probabilities 
+      // ---------------------------
+  
+      // Remember: vstate = xbk ~ xmd
+      //    where:  xbk = (1|2| ... |14).*.(1|1|....|1)
+      //                xmd = (1|1| ... |1) .*.(1|2|....|14)
+  
+      // Transition xbk for BK: abk = 0
+      // Pr( xbk' | xbk, xmd, abk =0) = 1{xbk' = xbk)
+      tranxbk_bk0 = eye(numx) ;     // Transition of xbk in the space of xbk
+      tranxbk_bk0 = tranxbk_bk0.*.ones(numx,numx) ; // Transition of xbk in the space of xbk, xmd
+    
+      // Transition xbk for BK: abk = 1
+      // Pr( xbk' | xbk, xmd, abk =0) = 1{xbk' = xbk+1)
+      tranxbk_bk1 = (zeros(numx-1,1) ~ eye(numx-1)) 
+                  | (zeros(1,numx-1) ~ 1);      // Transition of xbk in the space of xbk
+      tranxbk_bk1 = tranxbk_bk1.*.ones(numx,numx) ; // Transition of xbk in the space of xbk, xmd
+
+      // Transition xmd for MD: amd = 0
+      // Pr( xmd' | xbk, xmd, amd =0) = 1{xmd' = xmd)
+      tranxmd_md0 = eye(numx) ;     // Transition of xmd in the space of xmd
+      tranxmd_md0 = ones(numx,numx).*.tranxmd_md0 ; // Transition of xmd in the space of xbk, xmd
+
+      // Transition xmd for MD: amd = 1
+      // Pr( xmd' | xbk, xmd, amd =1) = 1{xmd' = xmd+1)
+      tranxmd_md1 = (zeros(numx-1,1) ~ eye(numx-1)) 
+                  | (zeros(1,numx-1) ~ 1);      // Transition of xmd in the space of xmd
+      tranxmd_md1 = ones(numx,numx).*.tranxmd_md1 ; // Transition of xmd in the space of xbk, xmd
+
+      // Transition xmd from the point of view of BK who doesn't know amd
+      // Pr( xmd' | xbk, xmd) = (1-pmd) * 1{xmd' = xmd) +  pmd * 1{xmd' = xmd+1)
+      tranxmd_bk = (1-p_md).* tranxmd_md0 + p_md.* tranxmd_md1 ;
+
+      // Transition xbk from the point of view of MD who doesn't know abk
+      // Pr( xbk' | xbk, xmd) = (1-pbk) * 1{xbk' = xbk) +  pbk * 1{xbk' = xbk+1)
+      tranxbk_md = (1-p_bk).* tranxbk_bk0 + p_bk.* tranxbk_bk1 ;
+
+      // Total transition matrix of (xbk,xmd) for BK if abk = 0
+      // Pr( xbk',xmd' | xbk, xmd, abk=0) = Pr( xbk' | xbk, abk =0) *  Pr( xmd' | xbk, xmd)
+      tottran_bk0 = tranxbk_bk0 .* tranxmd_bk ;
+      if sumc(sumc(tottran_bk0').>(1.00001)) or sumc(sumc(tottran_bk0').<(0.99999)) ; 
+        "ERROR: Transition matrix does not sum 1" ; end ;
+      endif ;
+
+      // Total transition matrix of (xbk,xmd) for BK if abk = 1
+      // Pr( xbk',xmd' | xbk, xmd, abk=1) = Pr( xbk' | xbk, abk =1) *  Pr( xmd' | xbk, xmd)
+      tottran_bk1 = tranxbk_bk1 .* tranxmd_bk ;
+      if sumc(sumc(tottran_bk1').>(1.00001)) or sumc(sumc(tottran_bk1').<(0.99999)) ; 
+          "ERROR: Transition matrix does not sum 1" ; end ;
+      endif ;
+
+      // Total transition matrix of (xbk,xmd) for MD if amd = 0
+      // Pr( xbk',xmd' | xbk, xmd, amd=0) = Pr( xmd' | xmd, amd =0) *  Pr( xbk' | xbk, xmd)
+      tottran_md0 = tranxmd_md0 .* tranxbk_md ;
+      if sumc(sumc(tottran_md0').>(1.00001)) or sumc(sumc(tottran_md0').<(0.99999)) ; 
+          "ERROR: Transition matrix does not sum 1" ; end ;
+      endif ;
+
+      // Total transition matrix of (xbk,xmd) for MD if amd = 1
+      // Pr( xbk',xmd' | xbk, xmd, amd=1) = Pr( xmd' | xmd, amd =1) *  Pr( xbk' | xbk, xmd)
+      tottran_md1 = tranxmd_md1 .* tranxbk_md ;
+      if sumc(sumc(tottran_md1').>(1.00001)) or sumc(sumc(tottran_md1').<(0.99999)) ; 
+          "ERROR: Transition matrix does not sum 1" ; end ;
+      endif ;
+
+      // Unconditional transition matrix
+      uncontran = (1-p_bk) .* tottran_bk0 + p_bk .* tottran_bk1 ;
+      if sumc(sumc(uncontran').>(1.00001)) or sumc(sumc(uncontran').<(0.99999)) ; 
+          "ERROR: Transition matrix does not sum 1" ; end ;
+      endif ;
+
+      // -----------------------------------------------------------------------
+      // ztilda_bk, ztilda_md, etilda_bk, etilda_md for every possible state
+      // -----------------------------------------------------------------------
+      uncontran = inv(eye(ns) - beta*uncontran) ;   // Matrix (I - beta*F)^-1
+      value_z_bk = (1-p_bk).*eprofbk_0 + p_bk.*eprofbk_1 ;
+      value_z_bk = uncontran * value_z_bk ;         // Value Z function BK
+      value_e_bk = uncontran * pdfn(cdfni(p_bk)) ;  // Value e function BK
+      value_z_md = (1-p_md).*eprofmd_0 + p_md.*eprofmd_1 ;
+      value_z_md = uncontran * value_z_md ;         // Value Z function MD
+      value_e_md = uncontran * pdfn(cdfni(p_md)) ;  // Value e function MD
+
+      zt_bk = (eprofbk_1 - eprofbk_0) + beta*(tottran_bk1-tottran_bk0)*value_z_bk ;
+      zt_md = (eprofmd_1 - eprofmd_0) + beta*(tottran_md1-tottran_md0)*value_z_md ;
+      et_bk = beta*(tottran_bk1-tottran_bk0)*value_e_bk ;
+      et_md = beta*(tottran_md1-tottran_md0)*value_e_md ;
+
+      // ------------
+      // Filling 
+      // ------------
+      count1 = (m-1)*ns + 1 ;
+      count2 = m*ns ;
+      ztilda_bk[count1:count2,.] = zt_bk ;
+      ztilda_md[count1:count2,.] = zt_md ;
+      etilda_bk[count1:count2,.] = et_bk ;
+      etilda_md[count1:count2,.] = et_md ;
+
+      count1 = (m-1)*nyear + 1 ;
+      count2 = m*nyear ;
+      ztilda_obs_bk[count1:count2,.] = zt_bk[indxobs[count1:count2],.] ;
+      ztilda_obs_md[count1:count2,.] = zt_md[indxobs[count1:count2],.] ;
+      etilda_obs_bk[count1:count2,.] = et_bk[indxobs[count1:count2],.] ;
+      etilda_obs_md[count1:count2,.] = et_md[indxobs[count1:count2],.] ;
+      
+      m=m+1;
+    endo ;
+  
+    // ---------------------------------------------
+    // TASK 2: Pseudo Maximum Likelihood Estimation 
+    // ---------------------------------------------
+    zobs = (ztilda_obs_bk[.,1:kvpfc]          | zeros(nobs,kvpfc)) 
+         ~ (zeros(nobs,kvpfc)                 | ztilda_obs_md[.,1:kvpfc])
+         ~ (ztilda_obs_bk[.,kvpfc+1:kvpfc+kz] | ztilda_obs_md[.,kvpfc+1:kvpfc+kz]) ;
+    eobs = etilda_obs_bk | etilda_obs_md ;
+    {thetaest,varest,likelihood} 
+        = miprobit((yobs[.,1]|yobs[.,2]),zobs,eobs,zeros(ktot,1),namesb,1) ;
+
+    // ---------------------------------------------------
+    // TASK 3: Updating Conditional Choice Probabilities
+    // ---------------------------------------------------
+    theta_bk = thetaest[1:kvpfc]         | thetaest[2*kvpfc+1:ktot] ;
+    theta_md = thetaest[kvpfc+1:2*kvpfc] | thetaest[2*kvpfc+1:ktot] ;
+    pchoice  = cdfn(ztilda_bk*theta_bk + etilda_bk) ~ cdfn(ztilda_md*theta_md + etilda_md) ;
+
+    // --------------------------
+    // Checking for Convergence
+    // --------------------------
+    criterion = maxc(abs(thetaest-theta0)) ;
+    
+    theta0 = thetaest ;    
+    npliter = npliter+1 ;
+  endo ;
+  
+  // ---------------------------------------------
+  //  Observed Conditional Choice Probabilities: 
+  // ---------------------------------------------
+  pest_obs = cdfn(ztilda_obs_bk * theta_bk + etilda_obs_bk)
+           ~ cdfn(ztilda_obs_md * theta_md + etilda_obs_md) ;
+  
+  retp(thetaest,varest,pchoice,pest_obs) ;
+endp ;
+
+
+// ***********************************
+// PART 4: ESTIMATION OF INITIAL CCPs
+// ***********************************
+prob_freq = zeros(nmarket*nstate,nplayer) ;
+market = 1 ;
+do while market<=nmarket ;
+  count1 = (market-1)*nstate + 1 ;
+  count2 = market*nstate ;
+  yyy = a_bk[(market-1)*nyear+1:market*nyear] ~ a_md[(market-1)*nyear+1:market*nyear] ;
+  xxx = x_bk[(market-1)*nyear+1:market*nyear] ~ x_md[(market-1)*nyear+1:market*nyear] ;
+  buff = freqprob(yyy,xxx,vstate) ;
+  prob_freq[count1:count2,.] = freqprob(yyy,xxx,vstate) ;
+  market = market+1 ;
+endo ;
+// Alternatively, the user could initialize the NPL algorithm using 
+// a vector of constant probabiliies, e.g.,
+//      prob_freq = (1/2)*ones(nmarket*nstate,nplayer);
+// or using random draws from a uniform distribution, e.g.,
+//      prob_freq = rndu(nmarket*nstate,nplayer);
+    
+
+// ************************
+// PART 5: NPL ESTIMATION
+// ************************
+{best,varb,pstate,pobs} = 
+npl_bkmd((a_bk~a_md),(x_bk~x_md),marketsize,zmarket,prob_freq,vstate,dfact,maxiter,namesb);
+
+end ;

@@ -1,0 +1,20 @@
+      fun: 27644.564790590302
+ hess_inv: <2x2 LbfgsInvHessProduct with dtype=float64>
+      jac: array([ 0.45329216, -0.0865839 ])
+  message: b'CONVERGENCE: REL_REDUCTION_OF_F_<=_FACTR*EPSMCH'
+     nfev: 87
+      nit: 10
+   status: 0
+  success: True
+        x: array([0.90406444, 2.30659021])
+
+
+      fun: 27635.060301977355
+ hess_inv: <2x2 LbfgsInvHessProduct with dtype=float64>
+      jac: array([-0.10513759,  0.14333636])
+  message: b'CONVERGENCE: REL_REDUCTION_OF_F_<=_FACTR*EPSMCH'
+     nfev: 39
+      nit: 5
+   status: 0
+  success: True
+        x: array([0.88812127, 1.89861624])
